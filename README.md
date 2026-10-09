@@ -1,12 +1,12 @@
 # Conty: métricas das redes do criador
 
-Serviço que recebe uma conexão já autorizada (o token pode ser fictício) e sincroniza as métricas dos posts de Instagram, TikTok, YouTube e X. Sobrevive a timeout, resposta duplicada e rate limit do provedor, e não conta o mesmo post duas vezes, mesmo com janelas que se sobrepõem.
+Serviço que recebe uma conexão já autorizada (o token pode ser fictício) e sincroniza as métricas dos posts de Instagram, TikTok, YouTube e X. Sobrevive a timeout, resposta duplicada e rate limit do provedor, e não conta o mesmo post duas vezes, mesmo com janelas que se sobrepõem. Provedor sem timestamp (YouTube e X no fake) tem um limite, descrito em "Casos de borda".
 
 Não há OAuth real e não há chamada de rede real. O provedor é um fake com dados de demonstração.
 
 ## Como rodar
 
-Node 22.13 ou mais novo (`node:sqlite` sem flag). Testado no 24.
+Node 22.13 ou mais novo (`node:sqlite` sem flag). Testado no 24; o vitest declara suporte a 22, 24 e 26 ou mais.
 
 ```
 npm install
@@ -27,7 +27,7 @@ flowchart LR
   AD -->|RawFetch| FAKE["FakeProvider: só para dev e teste"]
 ```
 
-- `src/domain/sync-service.ts` guarda toda a regra: janela, paginação, retry, 429, idempotência. Não conhece nome de campo de plataforma.
+- `src/domain/sync-service.ts` orquestra o sync: paginação, retry, 429, cursor e estados do run. Não conhece nome de campo de plataforma. A validação da janela fica em `src/app.ts`, a decisão de duplicata em `src/storage/posts.ts` e as chaves únicas no SQL de `src/db.ts`.
 - `src/providers/adapters/*` traduzem o formato cru de cada plataforma (`play_count`, `viewCount`, `public_metrics.impression_count`, ...) para `PostMetrics`. O formato cru não passa dessa camada. Todo erro sai como `ProviderError` com um `kind` (`timeout`, `server`, `rate_limited`, `unauthorized`, ...).
 - `src/providers/fake/*` é o provedor falso. Ele fala o formato cru de cada plataforma, então os adapters são exercitados de verdade. Cada chamada pode ser roteirizada: página normal, timeout, travar, 5xx, 429 com `Retry-After`, payload torto, página repetida.
 - `src/db.ts` é o único arquivo que importa `node:sqlite`.
@@ -40,7 +40,7 @@ As métricas dos provedores são contadores absolutos ("este vídeo tem 1200 vie
 - `posts` tem `UNIQUE (connection_id, platform_post_id)`. Ver o mesmo post de novo só atualiza `last_seen_at`.
 - `snapshots` é append-only (triggers bloqueiam UPDATE e DELETE) com `UNIQUE (post_id, provider_observed_at)`. Cada linha guarda `fetched_at` (nosso relógio) e `provider_observed_at` (relógio do provedor).
 - O valor atual de um post é o último snapshot por tempo do provedor (view `current_metrics`). Nunca é soma. Totais por criador somam o valor atual de posts distintos.
-- Cada página é gravada numa transação, junto com os contadores e o cursor do run (`sync_runs.next_cursor`, `sync_run_posts`). Se qualquer item da página falha na gravação, nada dela fica.
+- Cada página é gravada numa transação, junto com os contadores e o cursor do run (`sync_runs.next_cursor`, `sync_run_posts`). A última página grava também o status `succeeded`, na mesma transação. Se qualquer item da página falha na gravação, nada dela fica, e um `resume` repete só essa página.
 
 Exemplo com janelas sobrepostas, como nos testes. Posts publicados nos dias 3, 6, 10, 14, 18 e 22, com 100 a 600 views:
 
@@ -56,7 +56,7 @@ Casos de borda:
 
 - **Snapshot mais antigo chegando depois** fica no histórico, mas não vira o atual. O atual é decidido pelo tempo do provedor, não pela ordem de chegada.
 - **Mesmo `provider_observed_at` com números diferentes**: vale o primeiro. O timestamp é a versão do dado no provedor; dois valores para a mesma versão é um provedor incoerente, e não escolho o segundo só por ter chegado depois.
-- **Provedor sem timestamp** (YouTube e X no fake): `provider_observed_at` fica `NULL` e o tempo efetivo é o `fetched_at`. Como o SQLite trata `NULL` como distinto, a constraint não protege esse caso. A regra, dentro da transação da página: se os contadores são idênticos ao último snapshot, é duplicado. Eu preferi isso a um hash único por post porque contadores podem voltar a um valor antigo (5 likes, 6, 5 de novo) e um hash único descartaria o último. **O custo é real:** sem timestamp não existe como saber que uma resposta velha foi reenviada. Se o provedor devolver 100, depois 200, depois repetir a resposta de 100, o valor atual volta a 100, porque para nós isso é indistinguível de uma queda legítima. Para YouTube e X de verdade, a defesa é não reaproveitar respostas (cache, retry de proxy) antes do adapter.
+- **Provedor sem timestamp** (YouTube e X no fake): `provider_observed_at` fica `NULL` e o tempo efetivo é o `fetched_at`, do relógio local. Se esse relógio recuar, um valor novo só vira o atual quando o relógio passar do anterior. Como o SQLite trata `NULL` como distinto, a constraint não protege esse caso. A regra, dentro da transação da página: se os contadores são idênticos ao último snapshot, é duplicado. Eu preferi isso a um hash único por post porque contadores podem voltar a um valor antigo (5 likes, 6, 5 de novo) e um hash único descartaria o último. **O custo é real:** sem timestamp não existe como saber que uma resposta velha foi reenviada. Se o provedor devolver 100, depois 200, depois repetir a resposta de 100, o valor atual volta a 100, porque para nós isso é indistinguível de uma queda legítima. Para YouTube e X de verdade, a defesa é não reaproveitar respostas (cache, retry de proxy) antes do adapter.
 - **Timestamp no futuro** (mais de 5 minutos à frente do nosso relógio) reprova a página inteira. Um valor futuro ficaria como "último" para sempre e congelaria o post.
 - **Contador negativo, fracionário, acima de 1e12 ou que não seja número** (texto só com dígitos é aceito, o YouTube envia assim): a página falha com `invalid_payload`, sem retry e sem gravar nada. O teto de 1e12 por contador não limita a soma: com mais de uns 9 mil posts no teto a soma passa de 2^53 e `GET /creators/:id/metrics` responde 500 em vez de um número impreciso. Não é um volume realista de views; escolhi o erro explícito a arredondar em silêncio.
 - **Dois syncs ao mesmo tempo na mesma conexão**: o segundo recebe 409 (índice único parcial em `sync_runs` onde `status = 'running'`). Um run que ficou `running` por queda do processo é marcado `failed` (`interrupted`) na subida.
@@ -96,7 +96,7 @@ O teto de tentativas vale por página e por execução (`sync` ou `resume`), nã
 
 ## Exemplos (executados no servidor de desenvolvimento)
 
-O servidor de desenvolvimento tem contas e tokens de demonstração: `ig_ana`, `tt_ana`, `yt_ana`, `x_ana` com 8 posts cada em setembro de 2026, e os tokens `demo-token` (normal), `demo-flaky` (primeiro pedido responde 429 com `Retry-After: 2`), `demo-ratelimited` (sempre 429 com `Retry-After: 3600`) e `demo-revoked` (sempre 401). Saídas abaixo foram truncadas apenas onde indicado.
+O servidor de desenvolvimento tem contas e tokens de demonstração: `ig_ana`, `tt_ana`, `yt_ana`, `x_ana` com 8 posts cada em setembro de 2026, e os tokens `demo-token` (normal), `demo-flaky` (primeiro pedido responde 429 com `Retry-After: 2`), `demo-ratelimited` (sempre 429 com `Retry-After: 3600`) e `demo-revoked` (sempre 401). Os comandos são de bash (no Windows, Git Bash ou WSL). As respostas de run abaixo são trechos: omitem campos como `connection_id`, `window_*`, `posts_upserted`, `duplicates_skipped`, `next_cursor` e `error` quando não mudam o ponto do exemplo.
 
 Criar conexão. O token não volta na resposta:
 
@@ -116,6 +116,8 @@ curl -s -X POST localhost:3000/connections -H 'content-type: application/json' \
   "last_successful_sync_at": null
 }
 ```
+
+Nos comandos abaixo, `ID` é o `id` dessa resposta (`ID=con_b52db94e-...`).
 
 Duas janelas que se sobrepõem (posts dos dias 11 e 14 aparecem nas duas):
 
@@ -154,7 +156,7 @@ curl -s -X POST localhost:3000/connections/$ID/sync -H 'content-type: applicatio
 }
 ```
 
-(Campos `connection_id`, `next_cursor`, `retry_at`, `error_code` e `error` omitidos aqui; a API os devolve.) Os dois posts repetidos foram ignorados. Os posts, com `fetched_at` por item, o primeiro de oito:
+Os dois posts repetidos foram ignorados. Os posts, com `fetched_at` por item, o primeiro de oito:
 
 ```
 curl -s localhost:3000/connections/$ID/posts
@@ -233,8 +235,9 @@ curl -s localhost:3000/creators/ana/metrics
 }
 ```
 ```
-curl -s -X POST localhost:3000/sync-runs/run_beb057be-6791-43b0-aa4d-cd4c578c6f8c/resume   # antes de retry_at
-HTTP 409  {"error":{"code":"too_early","message":"the provider asked to wait until retry_at","retry_at":"2026-10-09T16:32:26.757Z"}}
+curl -s -w '\nHTTP %{http_code}\n' -X POST localhost:3000/sync-runs/$RUN/resume   # antes de retry_at, com RUN igual ao id do run acima
+{"error":{"code":"too_early","message":"the provider asked to wait until retry_at","retry_at":"2026-10-09T16:32:26.757Z"}}
+HTTP 409
 ```
 
 401 (X com `demo-revoked`): falha na hora, a conexão vira `needs_reauth` e o sync seguinte é recusado:
@@ -249,20 +252,20 @@ HTTP 409  {"error":{"code":"too_early","message":"the provider asked to wait unt
 - Cliente HTTP real para as APIs das plataformas. A fronteira é `RawFetch`; trocar o fake por `fetch` com URL base é a próxima peça.
 - Agendador. `retry_at` e `resume` existem para ele, mas nada chama `resume` sozinho.
 - Autenticação e autorização da própria API, e criptografia do token em repouso (hoje fica em texto no SQLite).
-- Mais de um processo na mesma base. O índice parcial garante "um run por conexão" mesmo assim, e as transações usam `BEGIN IMMEDIATE`, mas não testei dois processos de verdade.
+- Mais de um processo na mesma base. A subida marca como `failed` (`interrupted`) todo run `running`, inclusive o de um processo vivo, então o índice parcial de "um run por conexão" não protege esse caso. Não testei dois processos.
 - Agregados por campanha: só por criador. Campanha precisaria do vínculo post-campanha, que não está no escopo.
 - `Retry-After` nos formatos antigos de data (RFC 850, asctime): só o formato IMF-fixdate é lido; o resto cai no backoff.
 - Migrações: o esquema é criado com `CREATE ... IF NOT EXISTS` na abertura.
 
 ## Testes
 
-`npm test` roda 88 testes do vitest, sem espera real (relógio e sleeper falsos, exceto um teste que usa um timeout real de 25 ms para provar que o `AbortSignal` está ligado).
+`npm test` roda 91 testes do vitest, sem espera real (relógio e sleeper falsos, exceto um teste que usa um timeout real de 25 ms para provar que o `AbortSignal` está ligado).
 
 - `test/idempotency.test.ts`: janelas sobrepostas, mesma página duas vezes, item duplicado na página, snapshot mais velho depois do novo, sem timestamp, constraints do banco, contador inválido derrubando a página.
 - `test/retry.test.ts`: timeout seguido de sucesso, 5xx esgotando em 5 tentativas, 429 com 30 s esperando exatamente 30 s, data HTTP, 429 acima do teto sem espera e com `retry_at`, no teto exato, teto de tentativas compartilhado, 401, retomada pelo cursor, cursor repetido.
-- `test/hardening.test.ts`: teto de tentativas por página, `maxPages` depois de `resume`, novo sync durante o `Retry-After` (inclusive depois de queda no meio da espera), 401 tardio, janelas com fração de segundo e datas inexistentes, paginação torta, rollback de página por falha de gravação, validação das variáveis de ambiente.
+- `test/hardening.test.ts`: teto de tentativas por página, `maxPages` depois de `resume`, novo sync durante o `Retry-After` (inclusive com o run deixado `running` por uma queda), 401 tardio, janelas com fração de segundo e datas inexistentes, paginação torta, resposta do X sem `data` nem `meta`, rollback de página por falha de gravação, última página e `succeeded` na mesma transação, validação das variáveis de ambiente.
 - `test/adapters.test.ts`: o formato de cada plataforma vira o mesmo `PostMetrics`; parse de `Retry-After`.
-- `test/http.test.ts`: rotas, validação, `fetched_at` visível, 409 de sync concorrente, reconexão depois de `needs_reauth`.
+- `test/http.test.ts`: rotas, validação, `fetched_at` visível, 409 de sync concorrente, reconexão depois de `needs_reauth`, `?async=true` sem derrubar o processo quando o run não consegue gravar o próprio resultado.
 
 ## Uso de IA
 

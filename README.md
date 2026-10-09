@@ -266,7 +266,7 @@ HTTP 409  {"error":{"code":"too_early","message":"the provider asked to wait unt
 
 ## Uso de IA
 
-O código e os testes foram escritos com um assistente de IA (Claude), que eu dirigi. O que eu revisei e ajustei:
+Usei mais de um modelo de IA, cada um num papel: Claude Opus 5.5 para planejar, dividir o trabalho e conferir as entregas; Claude Sonnet 5.5 para escrever o código e os testes; e GPT-6.1 Sol para uma revisão independente contra o enunciado, cujos achados válidos entraram como correção. Eu dirigi o processo e revisei o resultado. O que eu revisei e ajustei:
 
 - Para provedores sem timestamp, não usei hash único por post e fiz a comparação com o último snapshot. O hash descartaria um contador que volta a um valor antigo (5, 6, 5 likes), e escrevi um teste para esse caso. Também deixei escrito no README o furo que sobra: resposta velha reenviada.
 - Conferi que o teto do `Retry-After` vale na fronteira: 60 s espera, 61 s não espera e grava `retry_at`. Quebrei a comparação de propósito para ver os testes falharem.

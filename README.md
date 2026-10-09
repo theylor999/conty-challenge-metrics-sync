@@ -21,10 +21,10 @@ npm run typecheck
 
 ```mermaid
 flowchart LR
-  HTTP[Hono: src/app.ts] --> SVC[SyncService: regra de negócio]
-  SVC --> REPO[storage + src/db.ts: SQLite]
-  SVC -->|MetricsProvider| AD[adapters: instagram, tiktok, youtube, x]
-  AD -->|RawFetch| FAKE[FakeProvider: so existe para dev e teste]
+  HTTP["Hono (src/app.ts)"] --> SVC["SyncService: regra de negócio"]
+  SVC --> REPO["storage + src/db.ts (SQLite)"]
+  SVC -->|MetricsProvider| AD["adapters: instagram, tiktok, youtube, x"]
+  AD -->|RawFetch| FAKE["FakeProvider: só para dev e teste"]
 ```
 
 - `src/domain/sync-service.ts` guarda toda a regra: janela, paginação, retry, 429, idempotência. Não conhece nome de campo de plataforma.

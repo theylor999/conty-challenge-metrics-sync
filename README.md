@@ -266,7 +266,7 @@ HTTP 409  {"error":{"code":"too_early","message":"the provider asked to wait unt
 
 ## Uso de IA
 
-Escrevi o código e os testes com um assistente de código com IA (Claude), que eu dirigi. O que eu revisei e ajustei:
+O código e os testes foram escritos com um assistente de IA (Claude), que eu dirigi. O que eu revisei e ajustei:
 
 - Para provedores sem timestamp, não usei hash único por post e fiz a comparação com o último snapshot. O hash descartaria um contador que volta a um valor antigo (5, 6, 5 likes), e escrevi um teste para esse caso. Também deixei escrito no README o furo que sobra: resposta velha reenviada.
 - Conferi que o teto do `Retry-After` vale na fronteira: 60 s espera, 61 s não espera e grava `retry_at`. Quebrei a comparação de propósito para ver os testes falharem.

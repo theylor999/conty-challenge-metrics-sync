@@ -1,3 +1,4 @@
+import { isRealDate } from '../dates.ts';
 import { ProviderError } from './provider.ts';
 
 const MAX_COUNTER = 1e12;
@@ -35,7 +36,9 @@ export function isoTime(value: unknown, field: string): string {
   if (typeof value === 'string') {
     const normalized = value.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
     const at = Date.parse(normalized);
-    if (/[zZ]|[+-]\d{2}:\d{2}$/.test(normalized) && !Number.isNaN(at)) return new Date(at).toISOString();
+    const day = /^(\d{4})-(\d{2})-(\d{2})T/.exec(normalized);
+    const real = day !== null && isRealDate(Number(day[1]), Number(day[2]), Number(day[3]));
+    if (real && /[zZ]|[+-]\d{2}:\d{2}$/.test(normalized) && !Number.isNaN(at)) return new Date(at).toISOString();
   }
   throw bad(`${field}: expected ISO 8601 timestamp with offset`);
 }

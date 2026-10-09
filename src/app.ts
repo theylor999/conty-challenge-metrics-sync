@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Clock } from './clock.ts';
+import { isRealDate } from './dates.ts';
 import { AppError } from './errors.ts';
 import { PLATFORMS, type ConnectionRow, type Platform, type SyncWindow } from './domain/types.ts';
 import type { SyncService } from './domain/sync-service.ts';
@@ -16,12 +17,6 @@ export interface AppDeps {
 }
 
 const ISO_INPUT = /^(\d{4})-(\d{2})-(\d{2})(T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d+)?)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d))?$/;
-
-/** Date.parse rolls 2026-02-30 over to March; a window that moves silently is worse than a 400. */
-function isRealDate(year: number, month: number, day: number): boolean {
-  const d = new Date(Date.UTC(year, month - 1, day));
-  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
-}
 
 export function createApp({ connections, posts, runs, sync, clock }: AppDeps): Hono {
   const app = new Hono();

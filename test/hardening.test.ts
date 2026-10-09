@@ -75,6 +75,27 @@ describe('rate limit cooldown', () => {
   });
 });
 
+describe('cooldown survives a restart', () => {
+  it('a run killed while waiting out a Retry-After still blocks new syncs until it passes', async () => {
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => (release = resolve));
+    const h = createHarness({ sleeper: { sleep: () => blocked } });
+    h.fake.seed('instagram', 'acct', posts3());
+    const connection = h.connect('instagram', 'tok');
+    h.fake.script('tok', rateLimited('30'), { kind: 'serve' });
+
+    const waiting = h.sync.start(connection.id, SEPTEMBER);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    h.runs.failInterrupted(h.clock.now().toISOString());
+
+    expect(() => h.sync.start(connection.id, SEPTEMBER)).toThrow(/retry_at/);
+    h.clock.advance(30_000);
+    release();
+    await waiting.done;
+    expect((await h.runSync(connection)).status).toBe('succeeded');
+  });
+});
+
 describe('credentials', () => {
   it('a 401 for the old token does not revoke a token renewed meanwhile', async () => {
     const t = setup();
@@ -132,6 +153,8 @@ describe('payload validation', () => {
     ['youtube', { items: [], nextPageToken: 123 }],
     ['x', { data: [], meta: { next_token: 123 } }],
     ['tiktok', { data: { videos: [], cursor: 1 } }],
+    ['instagram', { data: [], paging: { next: 0, cursors: { after: '2' } } }],
+    ['instagram', { data: [], paging: { next: 'https://graph.example/next', cursors: {} } }],
   ] as const;
 
   it.each(tokenCases)('%s: a malformed continuation is a broken page, not the end of the list', async (platform, body) => {
@@ -142,6 +165,18 @@ describe('payload validation', () => {
     const run = await h.runSync(connection);
 
     expect(run).toMatchObject({ status: 'failed', error_code: 'invalid_payload' });
+  });
+
+  it('rejects a provider date that does not exist instead of moving it', async () => {
+    const h = createHarness();
+    const connection = h.connect('x', 'ghost', 'a3');
+    h.fake.script('ghost', {
+      kind: 'raw',
+      status: 200,
+      body: { data: [{ id: '1', created_at: '2026-09-31T12:00:00Z', public_metrics: { impression_count: 1 } }] },
+    });
+
+    expect(await h.runSync(connection)).toMatchObject({ status: 'failed', error_code: 'invalid_payload' });
   });
 
   it('rejects counters above the supported range and unrepresentable timestamps', async () => {

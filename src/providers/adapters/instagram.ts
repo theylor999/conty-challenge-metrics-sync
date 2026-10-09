@@ -1,5 +1,5 @@
 import { bearer, callProvider } from '../http.ts';
-import { arr, count, isoTime, obj, str, toUnix } from '../parse.ts';
+import { arr, count, isoTime, obj, optionalToken, str, toUnix } from '../parse.ts';
 import type { MetricsProvider } from '../provider.ts';
 import type { AdapterDeps } from './deps.ts';
 
@@ -34,7 +34,8 @@ export function instagramProvider({ fetch, clock }: AdapterDeps): MetricsProvide
       });
 
       const paging = root.paging === undefined ? null : obj(root.paging, 'paging');
-      const nextCursor = paging?.next ? str(obj(paging.cursors, 'paging.cursors').after, 'paging.cursors.after') : null;
+      const hasNext = optionalToken(paging?.next, 'paging.next') !== null;
+      const nextCursor = hasNext ? str(obj(paging?.cursors, 'paging.cursors').after, 'paging.cursors.after') : null;
       return { posts, nextCursor };
     },
   };

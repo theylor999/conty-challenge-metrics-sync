@@ -89,10 +89,15 @@ export class SyncRunsRepo {
     return row?.at ?? null;
   }
 
-  /** Latest retry_at among the connection's rate_limited runs, or null. */
+  /** Written before a wait starts, so a restart in the middle of it does not forget what the provider asked. */
+  setRetryAt(id: string, retryAt: string): void {
+    this.db.run('UPDATE sync_runs SET retry_at = ? WHERE id = ?', retryAt, id);
+  }
+
+  /** Latest retry_at of the connection. finish() clears it unless the run stopped because of it. */
   rateLimitedUntil(connectionId: string): string | null {
     const row = this.db.get<{ at: string | null }>(
-      `SELECT MAX(retry_at) AS at FROM sync_runs WHERE connection_id = ? AND status = 'rate_limited'`,
+      'SELECT MAX(retry_at) AS at FROM sync_runs WHERE connection_id = ?',
       connectionId,
     );
     return row?.at ?? null;

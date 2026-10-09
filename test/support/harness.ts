@@ -48,10 +48,11 @@ export const testConfig: SyncConfig = {
   maxRetryAfterMs: 60_000,
 };
 
-export function createHarness(options: { config?: Partial<SyncConfig>; pageSize?: number; random?: () => number } = {}) {
+export function createHarness(options: { config?: Partial<SyncConfig>; pageSize?: number; random?: () => number; sleeper?: Sleeper } = {}) {
   const db = new Db(':memory:');
   const clock = new FakeClock(NOW);
   const sleeper = new FakeSleeper(clock);
+  const usedSleeper = options.sleeper ?? sleeper;
   const fake = new FakeProvider({ pageSize: options.pageSize ?? 2 });
   const connections = new ConnectionsRepo(db);
   const posts = new PostsRepo(db);
@@ -63,7 +64,7 @@ export function createHarness(options: { config?: Partial<SyncConfig>; pageSize?
     runs,
     providers: createProviders({ fetch: fake.fetch, clock }),
     clock,
-    sleeper,
+    sleeper: usedSleeper,
     config: { ...testConfig, ...options.config },
     random: options.random ?? (() => 0),
   });

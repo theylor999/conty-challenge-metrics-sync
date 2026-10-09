@@ -213,6 +213,7 @@ export class SyncService {
             if (exhausted) {
               return stop('rate_limited', 'rate_limited', `${error.message}; gave up after ${budget.attempts} attempts`, { retryAt });
             }
+            runs.setRetryAt(run.id, retryAt);
             await sleeper.sleep(waitMs);
             break;
           }

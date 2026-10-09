@@ -163,12 +163,15 @@ describe('sync and reading', () => {
       `CREATE TRIGGER no_finish BEFORE UPDATE ON sync_runs WHEN NEW.status <> 'running'
        BEGIN SELECT RAISE(ABORT, 'disk full'); END`,
     );
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    let report!: (error: unknown) => void;
+    const loggedError = new Promise<unknown>((resolve) => (report = resolve));
+    const logged = vi.spyOn(console, 'error').mockImplementation(report);
 
     const res = await h.post(`/connections/${connection.id}/sync?async=true`, { from: '2026-09-01', to: '2026-10-01' });
 
     expect(res.status).toBe(202);
-    await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('disk full') })));
+    const error = await loggedError;
+    expect(error).toMatchObject({ message: expect.stringContaining('disk full') });
     logged.mockRestore();
   });
 

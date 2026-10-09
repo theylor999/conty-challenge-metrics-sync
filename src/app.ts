@@ -15,7 +15,13 @@ export interface AppDeps {
   clock: Clock;
 }
 
-const ISO_INPUT = /^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2}))?$/;
+const ISO_INPUT = /^(\d{4})-(\d{2})-(\d{2})(T([01]\d|2[0-3]):[0-5]\d(:[0-5]\d(\.\d+)?)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d))?$/;
+
+/** Date.parse rolls 2026-02-30 over to March; a window that moves silently is worse than a 400. */
+function isRealDate(year: number, month: number, day: number): boolean {
+  const d = new Date(Date.UTC(year, month - 1, day));
+  return d.getUTCFullYear() === year && d.getUTCMonth() === month - 1 && d.getUTCDate() === day;
+}
 
 export function createApp({ connections, posts, runs, sync, clock }: AppDeps): Hono {
   const app = new Hono();
@@ -180,7 +186,9 @@ function platform(value: unknown): Platform {
 function window(body: Record<string, unknown>): SyncWindow {
   const parse = (field: 'from' | 'to') => {
     const value = body[field];
-    const at = typeof value === 'string' && ISO_INPUT.test(value) ? Date.parse(value) : NaN;
+    const match = typeof value === 'string' ? ISO_INPUT.exec(value) : null;
+    const real = match !== null && isRealDate(Number(match[1]), Number(match[2]), Number(match[3]));
+    const at = real ? Date.parse(value as string) : NaN;
     if (Number.isNaN(at)) {
       throw new AppError(400, 'invalid_field', `${field} must be an ISO 8601 date or datetime with offset`, { field });
     }

@@ -24,10 +24,10 @@ export class PostsRepo {
   /** Identity of a post is (connection, platform post id); seeing it again only refreshes last_seen. */
   upsertPost(connectionId: string, item: PostMetrics, now: string, runId: string): string {
     const row = this.db.get<{ id: string }>(
-      `INSERT INTO posts (id, connection_id, platform_post_id, published_at, url, first_seen_at, last_seen_at, last_sync_run_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO posts (id, connection_id, platform_post_id, published_at, url, first_seen_at, last_seen_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (connection_id, platform_post_id)
-       DO UPDATE SET last_seen_at = excluded.last_seen_at, last_sync_run_id = excluded.last_sync_run_id
+       DO UPDATE SET last_seen_at = excluded.last_seen_at
        RETURNING id`,
       `pst_${randomUUID()}`,
       connectionId,
@@ -36,8 +36,8 @@ export class PostsRepo {
       item.url,
       now,
       now,
-      runId,
     );
+    this.db.run('INSERT OR IGNORE INTO sync_run_posts (run_id, post_id) VALUES (?, ?)', runId, row!.id);
     return row!.id;
   }
 

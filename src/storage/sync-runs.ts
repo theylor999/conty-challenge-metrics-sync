@@ -59,7 +59,7 @@ export class SyncRunsRepo {
          snapshots_inserted = snapshots_inserted + ?,
          duplicates_skipped = duplicates_skipped + ?,
          next_cursor = ?,
-         posts_upserted = (SELECT COUNT(*) FROM posts WHERE last_sync_run_id = ?)
+         posts_upserted = (SELECT COUNT(*) FROM sync_run_posts WHERE run_id = ?)
        WHERE id = ?`,
       page.inserted,
       page.duplicates,
@@ -84,6 +84,15 @@ export class SyncRunsRepo {
   lastSucceededAt(connectionId: string): string | null {
     const row = this.db.get<{ at: string | null }>(
       `SELECT MAX(finished_at) AS at FROM sync_runs WHERE connection_id = ? AND status = 'succeeded'`,
+      connectionId,
+    );
+    return row?.at ?? null;
+  }
+
+  /** Latest retry_at among the connection's rate_limited runs, or null. */
+  rateLimitedUntil(connectionId: string): string | null {
+    const row = this.db.get<{ at: string | null }>(
+      `SELECT MAX(retry_at) AS at FROM sync_runs WHERE connection_id = ? AND status = 'rate_limited'`,
       connectionId,
     );
     return row?.at ?? null;

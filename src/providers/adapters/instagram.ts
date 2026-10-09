@@ -7,7 +7,7 @@ export function instagramProvider({ fetch, clock }: AdapterDeps): MetricsProvide
   return {
     platform: 'instagram',
     async fetchPage(req) {
-      const query: Record<string, string> = { since: toUnix(req.from), until: toUnix(req.to) };
+      const query: Record<string, string> = { since: toUnix(req.from), until: toUnix(req.to, 'ceil') };
       if (req.cursor) query.after = req.cursor;
       const body = await callProvider(
         fetch,

@@ -1,5 +1,5 @@
 export interface SyncConfig {
-  /** Ceiling of provider requests in one execution, first try included, 429 and transient errors together. */
+  /** Ceiling of provider requests for one page, first try included; 429 and transient errors share it. */
   maxAttempts: number;
   requestTimeoutMs: number;
   baseBackoffMs: number;
@@ -25,18 +25,23 @@ export const defaultSyncConfig: SyncConfig = {
   maxClockSkewMs: 5 * 60_000,
 };
 
+/** Largest value Node timers accept; above it setTimeout silently fires after 1 ms. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+
 export function syncConfigFromEnv(env: NodeJS.ProcessEnv): SyncConfig {
-  const num = (key: string, fallback: number) => {
+  const int = (key: string, fallback: number, min: number, max: number) => {
     const raw = env[key];
     if (raw === undefined || raw === '') return fallback;
     const value = Number(raw);
-    if (!Number.isFinite(value) || value < 0) throw new Error(`${key} must be a non-negative number`);
+    if (!Number.isInteger(value) || value < min || value > max) {
+      throw new Error(`${key} must be an integer between ${min} and ${max}`);
+    }
     return value;
   };
   return {
     ...defaultSyncConfig,
-    maxAttempts: Math.max(1, num('SYNC_MAX_ATTEMPTS', defaultSyncConfig.maxAttempts)),
-    requestTimeoutMs: num('SYNC_REQUEST_TIMEOUT_MS', defaultSyncConfig.requestTimeoutMs),
-    maxRetryAfterMs: num('SYNC_MAX_RETRY_AFTER_MS', defaultSyncConfig.maxRetryAfterMs),
+    maxAttempts: int('SYNC_MAX_ATTEMPTS', defaultSyncConfig.maxAttempts, 1, 100),
+    requestTimeoutMs: int('SYNC_REQUEST_TIMEOUT_MS', defaultSyncConfig.requestTimeoutMs, 1, MAX_TIMER_MS),
+    maxRetryAfterMs: int('SYNC_MAX_RETRY_AFTER_MS', defaultSyncConfig.maxRetryAfterMs, 0, MAX_TIMER_MS),
   };
 }

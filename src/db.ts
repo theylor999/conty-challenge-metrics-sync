@@ -44,8 +44,14 @@ CREATE TABLE IF NOT EXISTS posts (
   url               TEXT,
   first_seen_at     TEXT NOT NULL,
   last_seen_at      TEXT NOT NULL,
-  last_sync_run_id  TEXT NOT NULL REFERENCES sync_runs(id),
   UNIQUE (connection_id, platform_post_id)
+);
+
+-- Which posts a run touched, so posts_upserted stays true after a resume.
+CREATE TABLE IF NOT EXISTS sync_run_posts (
+  run_id   TEXT NOT NULL REFERENCES sync_runs(id),
+  post_id  TEXT NOT NULL REFERENCES posts(id),
+  PRIMARY KEY (run_id, post_id)
 );
 
 -- Append-only. provider_observed_at is NULL when the provider gives no timestamp

@@ -1,5 +1,5 @@
 import { bearer, callProvider } from '../http.ts';
-import { arr, count, isoTime, obj, str } from '../parse.ts';
+import { arr, count, isoTime, obj, optionalToken, str } from '../parse.ts';
 import type { MetricsProvider } from '../provider.ts';
 import type { AdapterDeps } from './deps.ts';
 
@@ -38,7 +38,7 @@ export function xProvider({ fetch, clock }: AdapterDeps): MetricsProvider {
       });
 
       const meta = root.meta === undefined ? {} : obj(root.meta, 'meta');
-      return { posts, nextCursor: typeof meta.next_token === 'string' ? meta.next_token : null };
+      return { posts, nextCursor: optionalToken(meta.next_token, 'next_token') };
     },
   };
 }

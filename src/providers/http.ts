@@ -1,6 +1,8 @@
 import type { Clock } from '../clock.ts';
 import { ProviderError, type PageRequest, type RawFetch, type RawRequest } from './provider.ts';
 
+// Far above any sane ceiling; keeps retry_at a valid date whatever the header says.
+const MAX_RETRY_AFTER_MS = 365 * 24 * 3600 * 1000;
 const HTTP_DATE = /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/;
 
 /**
@@ -10,10 +12,10 @@ const HTTP_DATE = /^[A-Za-z]{3}, \d{2} [A-Za-z]{3} \d{4} \d{2}:\d{2}:\d{2} GMT$/
 export function parseRetryAfter(value: string | undefined, nowMs: number): number | null {
   if (value === undefined) return null;
   const text = value.trim();
-  if (/^\d+$/.test(text)) return Number(text) * 1000;
+  if (/^\d+$/.test(text)) return Math.min(Number(text) * 1000, MAX_RETRY_AFTER_MS);
   if (HTTP_DATE.test(text)) {
     const at = Date.parse(text);
-    if (!Number.isNaN(at)) return Math.max(0, at - nowMs);
+    if (!Number.isNaN(at)) return Math.min(Math.max(0, at - nowMs), MAX_RETRY_AFTER_MS);
   }
   return null;
 }

@@ -6,7 +6,7 @@ Não há OAuth real e não há chamada de rede real. O provedor é um fake com d
 
 ## Como rodar
 
-Node 22 ou mais novo (testado no 24).
+Node 22.13 ou mais novo (`node:sqlite` sem flag). Testado no 24.
 
 ```
 npm install
@@ -15,7 +15,7 @@ npm test
 npm run typecheck
 ```
 
-`PORT`, `DB_PATH` (padrão `:memory:`), `SYNC_MAX_ATTEMPTS`, `SYNC_REQUEST_TIMEOUT_MS` e `SYNC_MAX_RETRY_AFTER_MS` mudam o comportamento do servidor de desenvolvimento.
+`PORT`, `DB_PATH` (padrão `:memory:`), `SYNC_MAX_ATTEMPTS`, `SYNC_REQUEST_TIMEOUT_MS` e `SYNC_MAX_RETRY_AFTER_MS` mudam o comportamento do servidor de desenvolvimento. Valores que o runtime trataria mal (fracionário, acima do limite de timer do Node) derrubam a subida com mensagem clara.
 
 ## Arquitetura
 
@@ -31,7 +31,7 @@ flowchart LR
 - `src/providers/adapters/*` traduzem o formato cru de cada plataforma (`play_count`, `viewCount`, `public_metrics.impression_count`, ...) para `PostMetrics`. O formato cru não passa dessa camada. Todo erro sai como `ProviderError` com um `kind` (`timeout`, `server`, `rate_limited`, `unauthorized`, ...).
 - `src/providers/fake/*` é o provedor falso. Ele fala o formato cru de cada plataforma, então os adapters são exercitados de verdade. Cada chamada pode ser roteirizada: página normal, timeout, travar, 5xx, 429 com `Retry-After`, payload torto, página repetida.
 - `src/db.ts` é o único arquivo que importa `node:sqlite`.
-- `Clock` e `Sleeper` são injetados. Nos testes o sleeper só registra a espera e adianta o relógio falso: nenhum teste espera de verdade.
+- `Clock` e `Sleeper` são injetados. Nos testes o sleeper só registra a espera e adianta o relógio falso. A única espera real é um teste com timeout de 25 ms que prova que o `AbortSignal` está ligado.
 
 ## Idempotência
 
@@ -40,7 +40,7 @@ As métricas dos provedores são contadores absolutos ("este vídeo tem 1200 vie
 - `posts` tem `UNIQUE (connection_id, platform_post_id)`. Ver o mesmo post de novo só atualiza `last_seen_at`.
 - `snapshots` é append-only (triggers bloqueiam UPDATE e DELETE) com `UNIQUE (post_id, provider_observed_at)`. Cada linha guarda `fetched_at` (nosso relógio) e `provider_observed_at` (relógio do provedor).
 - O valor atual de um post é o último snapshot por tempo do provedor (view `current_metrics`). Nunca é soma. Totais por criador somam o valor atual de posts distintos.
-- Cada página é gravada numa transação, junto com o contador e o cursor do run. Uma página que falha no meio não deixa nada.
+- Cada página é gravada numa transação, junto com os contadores e o cursor do run (`sync_runs.next_cursor`, `sync_run_posts`). Se qualquer item da página falha na gravação, nada dela fica.
 
 Exemplo com janelas sobrepostas, como nos testes. Posts publicados nos dias 3, 6, 10, 14, 18 e 22, com 100 a 600 views:
 
@@ -56,11 +56,11 @@ Casos de borda:
 
 - **Snapshot mais antigo chegando depois** fica no histórico, mas não vira o atual. O atual é decidido pelo tempo do provedor, não pela ordem de chegada.
 - **Mesmo `provider_observed_at` com números diferentes**: vale o primeiro. O timestamp é a versão do dado no provedor; dois valores para a mesma versão é um provedor incoerente, e não escolho o segundo só por ter chegado depois.
-- **Provedor sem timestamp** (YouTube e X no fake): `provider_observed_at` fica `NULL` e o tempo efetivo é o `fetched_at`. Como o SQLite trata `NULL` como distinto, a constraint não protege esse caso. A regra, dentro da transação da página: se os contadores são idênticos ao último snapshot, é duplicado. Eu preferi isso a um hash único por post porque contadores podem voltar a um valor antigo (5 likes, 6, 5 de novo) e um hash único descartaria o último. O custo: sem timestamp não dá para detectar página velha reenviada.
+- **Provedor sem timestamp** (YouTube e X no fake): `provider_observed_at` fica `NULL` e o tempo efetivo é o `fetched_at`. Como o SQLite trata `NULL` como distinto, a constraint não protege esse caso. A regra, dentro da transação da página: se os contadores são idênticos ao último snapshot, é duplicado. Eu preferi isso a um hash único por post porque contadores podem voltar a um valor antigo (5 likes, 6, 5 de novo) e um hash único descartaria o último. **O custo é real:** sem timestamp não existe como saber que uma resposta velha foi reenviada. Se o provedor devolver 100, depois 200, depois repetir a resposta de 100, o valor atual volta a 100, porque para nós isso é indistinguível de uma queda legítima. Para YouTube e X de verdade, a defesa é não reaproveitar respostas (cache, retry de proxy) antes do adapter.
 - **Timestamp no futuro** (mais de 5 minutos à frente do nosso relógio) reprova a página inteira. Um valor futuro ficaria como "último" para sempre e congelaria o post.
-- **Contador negativo, fracionário ou texto** no payload: a página falha com `invalid_payload`, sem retry e sem gravar nada.
+- **Contador negativo, fracionário, acima de 1e12 ou que não seja número** (texto só com dígitos é aceito, o YouTube envia assim): a página falha com `invalid_payload`, sem retry e sem gravar nada. O teto de 1e12 mantém a soma de vários posts como inteiro seguro.
 - **Dois syncs ao mesmo tempo na mesma conexão**: o segundo recebe 409 (índice único parcial em `sync_runs` onde `status = 'running'`). Um run que ficou `running` por queda do processo é marcado `failed` (`interrupted`) na subida.
-- **A janela é `[from, to)`**: um post publicado exatamente em `to` entra na próxima janela.
+- **A janela é `[from, to)`**: um post publicado exatamente em `to` entra na próxima janela. Instagram e TikTok só aceitam segundos inteiros, então o adapter alarga a janela (arredonda `from` para baixo e `to` para cima) e o serviço descarta tudo que vier fora da janela exata, inclusive o que um provedor devolver por engano. Datas que não existem (`2026-02-30`) dão 400.
 
 ## Retry, timeout e 429
 
@@ -68,23 +68,24 @@ Configuração (`src/config.ts`):
 
 | item | padrão |
 |---|---|
-| tentativas por execução (todas as causas somadas) | 5 |
+| tentativas por página (todas as causas somadas) | 5 |
 | timeout por requisição (`AbortSignal.timeout`) | 10 s |
 | backoff após falha transitória | 500 ms x 2^(n-1), teto 8 s, jitter de até -20% |
 | teto de espera por `Retry-After` | 60 s |
 | páginas por run | 200 |
 
-- **Timeout, erro de rede, 5xx, 408**: espera o backoff e tenta de novo a mesma página. Ao esgotar as 5 tentativas o run termina `failed` com `attempts = 5`. Esperas com os padrões e sem jitter: 0,5 s, 1 s, 2 s, 4 s.
+- **Timeout, erro de rede, 5xx, 408**: espera o backoff e tenta de novo a mesma página. Ao esgotar as 5 tentativas da página o run termina `failed` e `attempts` mostra o total de requisições do run. Esperas com os padrões e sem jitter: 0,5 s, 1 s, 2 s, 4 s.
 - **429 com `Retry-After`** (segundos ou data HTTP): espera exatamente esse tempo, pelo `Sleeper` injetado, e tenta de novo. Data no passado vale como "agora".
-- **429 com `Retry-After` acima do teto**: não espera. O run termina `rate_limited` com `retry_at` gravado e o `next_cursor` da última página concluída. Um agendador chama `POST /sync-runs/:id/resume` quando chegar `retry_at`; antes disso a resposta é 409 `too_early`. Uma espera nunca passa de `maxRetryAfterMs`.
+- **429 com `Retry-After` acima do teto**: não espera. O run termina `rate_limited` com `retry_at` gravado e o `next_cursor` da última página concluída. Um agendador chama `POST /sync-runs/:id/resume` quando chegar `retry_at`. Até lá, tanto `resume` quanto um `POST /connections/:id/sync` novo recebem 409 `too_early`, para que um segundo pedido não passe por cima do que o provedor pediu. Uma espera nunca passa de `maxRetryAfterMs`. Um `Retry-After` absurdo (anos) é limitado a 1 ano ao gravar `retry_at`.
 - **429 sem `Retry-After` válido**: usa o backoff.
-- **429 em todas as tentativas**: no teto de tentativas o run termina `rate_limited` com `retry_at`, sem esperar de novo.
-- **401**: falha na hora, sem retry, e a conexão vira `needs_reauth`. Novos syncs respondem 409 até `POST /connections` ser chamado de novo com o mesmo `account_id` e um token novo.
+- **429 em todas as tentativas da página**: no teto o run termina `rate_limited` com `retry_at`, sem esperar de novo.
+- **401**: falha na hora, sem retry, e a conexão vira `needs_reauth`. Novos syncs respondem 409 até `POST /connections` ser chamado de novo com o mesmo `account_id` e um token novo. Um 401 que chega para o token antigo depois da renovação não revoga o token novo.
 - **Outros 4xx**: falha na hora (`rejected`), sem marcar a conexão. 403 cai aqui de propósito: no YouTube ele também significa cota, e não quero revogar a conexão por isso.
 - **Retomada**: um retry repete só a página que falhou. Páginas anteriores não são buscadas de novo, nem dentro do run nem no `resume`.
-- **Cursor repetido** ou mais de 200 páginas: o run falha (`cursor_loop`, `too_many_pages`).
+- **Cursor repetido** ou mais de 200 páginas no run (contadas também depois de um `resume`): o run falha (`cursor_loop`, `too_many_pages`).
+- **Paginação torta** (`nextPageToken: 123`, `has_more` ausente): a página falha com `invalid_payload`. Não vale como "fim da lista", senão um sync incompleto viraria `succeeded`.
 
-O teto de tentativas vale por execução (`sync` ou `resume`). O `POST /connections/:id/sync` espera o run terminar; no pior caso, com 429 abaixo do teto, são 4 esperas de 60 s. Use `?async=true` para receber 202 na hora e acompanhar por `GET /sync-runs/:id`.
+O teto de tentativas vale por página, não pelo run inteiro: um run de 50 páginas que responde tudo bem não pode ser cortado por um limite de 5. O que limita o run é `maxPages`. O `POST /connections/:id/sync` espera o run terminar; no pior caso, com 429 abaixo do teto, são 4 esperas de 60 s por página. Use `?async=true` para receber 202 na hora e acompanhar por `GET /sync-runs/:id`.
 
 ## Onde ver quando a métrica foi buscada
 
@@ -248,17 +249,18 @@ HTTP 409  {"error":{"code":"too_early","message":"the provider asked to wait unt
 - Cliente HTTP real para as APIs das plataformas. A fronteira é `RawFetch`; trocar o fake por `fetch` com URL base é a próxima peça.
 - Agendador. `retry_at` e `resume` existem para ele, mas nada chama `resume` sozinho.
 - Autenticação e autorização da própria API, e criptografia do token em repouso (hoje fica em texto no SQLite).
-- Mais de um processo. A garantia "um run por conexão" vale por índice no banco, mas a regra de snapshot sem timestamp assume uma transação por vez, o que o SQLite com `BEGIN IMMEDIATE` já dá.
+- Mais de um processo na mesma base. O índice parcial garante "um run por conexão" mesmo assim, e as transações usam `BEGIN IMMEDIATE`, mas não testei dois processos de verdade.
 - Agregados por campanha: só por criador. Campanha precisaria do vínculo post-campanha, que não está no escopo.
 - `Retry-After` nos formatos antigos de data (RFC 850, asctime): só o formato IMF-fixdate é lido; o resto cai no backoff.
 - Migrações: o esquema é criado com `CREATE ... IF NOT EXISTS` na abertura.
 
 ## Testes
 
-`npm test` roda 66 testes do vitest, sem espera real (relógio e sleeper falsos, exceto um teste que usa um timeout real de 25 ms para provar que o `AbortSignal` está ligado).
+`npm test` roda 84 testes do vitest, sem espera real (relógio e sleeper falsos, exceto um teste que usa um timeout real de 25 ms para provar que o `AbortSignal` está ligado).
 
-- `test/idempotency.test.ts`: janelas sobrepostas, mesma página duas vezes, item duplicado na página, snapshot mais velho depois do novo, sem timestamp, constraints do banco, página atômica.
+- `test/idempotency.test.ts`: janelas sobrepostas, mesma página duas vezes, item duplicado na página, snapshot mais velho depois do novo, sem timestamp, constraints do banco, contador inválido derrubando a página.
 - `test/retry.test.ts`: timeout seguido de sucesso, 5xx esgotando em 5 tentativas, 429 com 30 s esperando exatamente 30 s, data HTTP, 429 acima do teto sem espera e com `retry_at`, no teto exato, teto de tentativas compartilhado, 401, retomada pelo cursor, cursor repetido.
+- `test/hardening.test.ts`: teto de tentativas por página, `maxPages` depois de `resume`, novo sync durante o `Retry-After`, 401 tardio, janelas com fração de segundo e datas inexistentes, paginação torta, rollback de página por falha de gravação, validação das variáveis de ambiente.
 - `test/adapters.test.ts`: o formato de cada plataforma vira o mesmo `PostMetrics`; parse de `Retry-After`.
 - `test/http.test.ts`: rotas, validação, `fetched_at` visível, 409 de sync concorrente, reconexão depois de `needs_reauth`.
 
@@ -266,7 +268,7 @@ HTTP 409  {"error":{"code":"too_early","message":"the provider asked to wait unt
 
 Escrevi o código e os testes com um assistente de código com IA (Claude), que eu dirigi. O que eu revisei e ajustei:
 
-- Para provedores sem timestamp, não usei hash único por post e fiz a comparação com o último snapshot. O hash descartaria um contador que volta a um valor antigo (5, 6, 5 likes), e escrevi um teste para esse caso.
+- Para provedores sem timestamp, não usei hash único por post e fiz a comparação com o último snapshot. O hash descartaria um contador que volta a um valor antigo (5, 6, 5 likes), e escrevi um teste para esse caso. Também deixei escrito no README o furo que sobra: resposta velha reenviada.
 - Conferi que o teto do `Retry-After` vale na fronteira: 60 s espera, 61 s não espera e grava `retry_at`. Quebrei a comparação de propósito para ver os testes falharem.
-- Fiz o 403 não revogar a conexão, porque no YouTube ele também é cota. Só 401 marca `needs_reauth`.
-- Fiz o contador `posts_upserted` ser calculado no banco, em vez de em memória, para continuar correto depois de um `resume`.
+- O teto de tentativas começou valendo pelo run inteiro, o que cortaria uma listagem longa em que toda chamada dá certo. Mudei para por página e deixei `maxPages` limitando o run, contado também depois de um `resume`.
+- Fiz o 403 não revogar a conexão, porque no YouTube ele também é cota. Só 401 marca `needs_reauth`, e só se o token que falhou ainda é o token atual.

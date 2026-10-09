@@ -1,5 +1,6 @@
 import { ProviderError } from './provider.ts';
 
+const MAX_COUNTER = 1e12;
 const bad = (message: string) => new ProviderError('invalid_payload', message);
 
 export function obj(value: unknown, field: string): Record<string, unknown> {
@@ -18,11 +19,14 @@ export function str(value: unknown, field: string): string {
   throw bad(`${field}: expected non-empty string`);
 }
 
-/** Counter as a non-negative integer. Accepts "123" because YouTube sends counters as strings. */
+/**
+ * Counter as a non-negative integer. Accepts "123" because YouTube sends counters as strings.
+ * Capped at 1e12 so that a sum over many posts stays a safe integer.
+ */
 export function count(value: unknown, field: string): number | null {
   if (value === undefined || value === null) return null;
   const n = typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : value;
-  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0) throw bad(`${field}: expected non-negative integer`);
+  if (typeof n !== 'number' || !Number.isSafeInteger(n) || n < 0 || n > MAX_COUNTER) throw bad(`${field}: expected non-negative integer`);
   return n;
 }
 
@@ -37,8 +41,19 @@ export function isoTime(value: unknown, field: string): string {
 }
 
 export function unixTime(value: unknown, field: string): string {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw bad(`${field}: expected unix seconds`);
-  return new Date(value * 1000).toISOString();
+  if (typeof value !== 'number' || value < 0) throw bad(`${field}: expected unix seconds`);
+  const at = new Date(value * 1000);
+  if (Number.isNaN(at.getTime())) throw bad(`${field}: expected unix seconds`);
+  return at.toISOString();
 }
 
-export const toUnix = (iso: string): string => String(Math.floor(Date.parse(iso) / 1000));
+/** Unix seconds for APIs without sub-second ranges. The bounds are widened, never narrowed; the service filters by the exact window. */
+export const toUnix = (iso: string, round: 'floor' | 'ceil' = 'floor'): string =>
+  String(Math[round](Date.parse(iso) / 1000));
+
+/** A continuation token that is absent ends the listing; one that is present but unusable is a broken page. */
+export function optionalToken(value: unknown, field: string): string | null {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string') throw bad(`${field}: expected string`);
+  return value;
+}

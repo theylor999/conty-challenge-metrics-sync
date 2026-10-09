@@ -1,5 +1,5 @@
 import { bearer, callProvider } from '../http.ts';
-import { arr, count, isoTime, obj, str } from '../parse.ts';
+import { arr, count, isoTime, obj, optionalToken, str } from '../parse.ts';
 import type { MetricsProvider } from '../provider.ts';
 import type { AdapterDeps } from './deps.ts';
 
@@ -39,7 +39,7 @@ export function youtubeProvider({ fetch, clock }: AdapterDeps): MetricsProvider 
         };
       });
 
-      return { posts, nextCursor: typeof root.nextPageToken === 'string' ? root.nextPageToken : null };
+      return { posts, nextCursor: optionalToken(root.nextPageToken, 'nextPageToken') };
     },
   };
 }

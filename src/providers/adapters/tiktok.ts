@@ -1,6 +1,6 @@
 import { bearer, callProvider } from '../http.ts';
 import { arr, count, obj, str, toUnix, unixTime } from '../parse.ts';
-import type { MetricsProvider } from '../provider.ts';
+import { ProviderError, type MetricsProvider } from '../provider.ts';
 import type { AdapterDeps } from './deps.ts';
 
 export function tiktokProvider({ fetch, clock }: AdapterDeps): MetricsProvider {
@@ -10,7 +10,7 @@ export function tiktokProvider({ fetch, clock }: AdapterDeps): MetricsProvider {
       const query: Record<string, string> = {
         open_id: req.accountId,
         start_time: toUnix(req.from),
-        end_time: toUnix(req.to),
+        end_time: toUnix(req.to, 'ceil'),
       };
       if (req.cursor) query.cursor = req.cursor;
       const body = await callProvider(
@@ -37,7 +37,8 @@ export function tiktokProvider({ fetch, clock }: AdapterDeps): MetricsProvider {
         };
       });
 
-      return { posts, nextCursor: data.has_more === true ? str(data.cursor, 'cursor') : null };
+      if (typeof data.has_more !== 'boolean') throw new ProviderError('invalid_payload', 'has_more: expected boolean');
+      return { posts, nextCursor: data.has_more ? str(data.cursor, 'cursor') : null };
     },
   };
 }

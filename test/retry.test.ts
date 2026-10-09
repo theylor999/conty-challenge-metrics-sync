@@ -92,7 +92,7 @@ describe('transient failures', () => {
 
     const run = await t.runSync(t.connection);
 
-    expect(run).toMatchObject({ status: 'failed', pages: 1, snapshots_inserted: 2, next_cursor: '2', attempts: 3 });
+    expect(run).toMatchObject({ status: 'failed', pages: 1, snapshots_inserted: 2, next_cursor: '2', attempts: 4 });
     expect(t.posts.totalsForCreator('creator_1').posts).toBe(2);
   });
 

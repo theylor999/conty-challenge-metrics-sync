@@ -200,20 +200,19 @@ describe('database enforces idempotency', () => {
   it('rejects a second post with the same (connection, platform_post_id)', async () => {
     const t = setup();
     await t.runSync(t.connection);
-    const row = t.db.get<{ connection_id: string; platform_post_id: string; last_sync_run_id: string }>(
-      'SELECT connection_id, platform_post_id, last_sync_run_id FROM posts LIMIT 1',
+    const row = t.db.get<{ connection_id: string; platform_post_id: string }>(
+      'SELECT connection_id, platform_post_id FROM posts LIMIT 1',
     )!;
 
     expect(() =>
       t.db.run(
-        `INSERT INTO posts (id, connection_id, platform_post_id, published_at, first_seen_at, last_seen_at, last_sync_run_id)
-         VALUES ('x', ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO posts (id, connection_id, platform_post_id, published_at, first_seen_at, last_seen_at)
+         VALUES ('x', ?, ?, ?, ?, ?)`,
         row.connection_id,
         row.platform_post_id,
         NOW,
         NOW,
         NOW,
-        row.last_sync_run_id,
       ),
     ).toThrow(/UNIQUE/);
   });

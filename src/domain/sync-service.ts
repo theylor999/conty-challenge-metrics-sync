@@ -48,6 +48,7 @@ export class SyncService {
 
   start(connectionId: string, window: SyncWindow): StartedSync {
     const connection = this.#activeConnection(connectionId);
+    this.#assertNotCoolingDown(connection.id);
     const run = this.#guardRunning(() =>
       this.deps.runs.create(connection.id, window, this.#now()),
     );
@@ -62,11 +63,17 @@ export class SyncService {
       throw new AppError(409, 'not_resumable', `a ${run.status} run cannot be resumed`);
     }
     this.#activeConnection(run.connection_id);
-    if (run.status === 'rate_limited' && run.retry_at && run.retry_at > this.#now()) {
-      throw new AppError(409, 'too_early', 'the provider asked to wait until retry_at', { retry_at: run.retry_at });
-    }
+    this.#assertNotCoolingDown(run.connection_id);
     this.#guardRunning(() => this.deps.runs.reopen(run.id));
     return { run: this.deps.runs.get(run.id)!, done: this.#execute(run.id) };
+  }
+
+  /** A provider that said "wait until X" is asked nothing before X, by a new run or a resumed one. */
+  #assertNotCoolingDown(connectionId: string): void {
+    const retryAt = this.deps.runs.rateLimitedUntil(connectionId);
+    if (retryAt !== null && retryAt > this.#now()) {
+      throw new AppError(409, 'too_early', 'the provider asked to wait until retry_at', { retry_at: retryAt });
+    }
   }
 
   #activeConnection(id: string): ConnectionRow {
@@ -103,7 +110,9 @@ export class SyncService {
         runs.finish(runId, { status: 'succeeded' }, this.#now());
       } else {
         this.deps.db.transaction(() => {
-          if (outcome.needsReauth) connections.setStatus(connection.id, 'needs_reauth', this.#now());
+          // A 401 for an old token must not revoke a token the user has just renewed.
+          const tokenUnchanged = connections.get(connection.id)?.access_token === connection.access_token;
+          if (outcome.needsReauth && tokenUnchanged) connections.setStatus(connection.id, 'needs_reauth', this.#now());
           runs.finish(
             runId,
             { status: outcome.status, errorCode: outcome.code, error: outcome.message, retryAt: outcome.retryAt },
@@ -123,22 +132,22 @@ export class SyncService {
 
   async #walkPages(run: SyncRunRow, connection: ConnectionRow): Promise<'succeeded' | Stop> {
     const { config, runs } = this.deps;
-    const budget = { attempts: 0 };
     const usedCursors = new Set<string>(run.next_cursor ? [run.next_cursor] : []);
     let cursor = run.next_cursor;
 
-    for (let pages = 0; ; pages++) {
+    for (let pages = run.pages; ; pages++) {
       if (pages >= config.maxPages) {
         return { status: 'failed', code: 'too_many_pages', message: `provider returned more than ${config.maxPages} pages` };
       }
-      const fetched = await this.#fetchPage(run, connection, cursor, budget);
+      // The attempt ceiling is per page; run.attempts counts every request of the run.
+      const fetched = await this.#fetchPage(run, connection, cursor, { attempts: 0 });
       if (!fetched.ok) return fetched.stop;
 
       const { page, fetchedAt } = fetched;
       this.deps.db.transaction(() => {
         let inserted = 0;
         let duplicates = 0;
-        for (const item of page.posts) {
+        for (const item of page.posts.filter((p) => p.publishedAt >= run.window_from && p.publishedAt < run.window_to)) {
           const postId = this.deps.posts.upsertPost(connection.id, item, fetchedAt, run.id);
           if (this.deps.posts.insertSnapshot(postId, item, fetchedAt, run.id)) inserted++;
           else duplicates++;
@@ -157,7 +166,7 @@ export class SyncService {
 
   /**
    * One page, with retries. A retry repeats this page's cursor only; earlier pages are not fetched again.
-   * `budget.attempts` counts every request of this execution, whatever the failure kind.
+   * `budget.attempts` counts the requests made for this page, whatever the failure kind.
    */
   async #fetchPage(
     run: SyncRunRow,

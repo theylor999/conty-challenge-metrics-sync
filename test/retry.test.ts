@@ -223,9 +223,11 @@ describe('429 and Retry-After', () => {
     const t = setup();
     t.fake.script('tok', rateLimited('59'), rateLimited('60'), rateLimited('61'));
 
-    await t.runSync(t.connection);
+    const run = await t.runSync(t.connection);
 
-    expect(Math.max(...t.sleeper.waits)).toBeLessThanOrEqual(60_000);
+    expect(t.sleeper.waits).toEqual([59_000, 60_000]);
+    expect(t.fake.calls).toHaveLength(3);
+    expect(run).toMatchObject({ status: 'rate_limited', error_code: 'rate_limited' });
   });
 });
 

@@ -17,6 +17,7 @@ export function xProvider({ fetch, clock }: AdapterDeps): MetricsProvider {
       );
 
       const root = obj(body, 'response');
+      if (root.data === undefined) obj(root.meta, 'meta'); // an empty timeline still carries meta; an errors-only body does not
       const posts = arr(root.data ?? [], 'data').map((raw, i) => {
         const tweet = obj(raw, `data[${i}]`);
         const id = str(tweet.id, 'id');

@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import type { Clock } from './clock.ts';
 import { isRealDate } from './dates.ts';
 import { AppError } from './errors.ts';
-import { PLATFORMS, type ConnectionRow, type Platform, type SyncWindow } from './domain/types.ts';
+import { PLATFORMS, type ConnectionRow, type Platform, type SyncRunRow, type SyncWindow } from './domain/types.ts';
 import type { SyncService } from './domain/sync-service.ts';
 import type { ConnectionsRepo } from './storage/connections.ts';
 import type { PostsRepo } from './storage/posts.ts';
@@ -55,7 +55,7 @@ export function createApp({ connections, posts, runs, sync, clock }: AppDeps): H
   app.post('/connections/:id/sync', async (c) => {
     const body = await readBody(c.req.raw);
     const { run, done } = sync.start(c.req.param('id'), window(body));
-    if (c.req.query('async') === 'true') return c.json(run, 202);
+    if (c.req.query('async') === 'true') return c.json(detached(run, done), 202);
     return c.json(await done);
   });
 
@@ -72,7 +72,7 @@ export function createApp({ connections, posts, runs, sync, clock }: AppDeps): H
 
   app.post('/sync-runs/:id/resume', async (c) => {
     const { run, done } = sync.resume(c.req.param('id'));
-    if (c.req.query('async') === 'true') return c.json(run, 202);
+    if (c.req.query('async') === 'true') return c.json(detached(run, done), 202);
     return c.json(await done);
   });
 
@@ -149,6 +149,12 @@ function mustGetConnection(connections: ConnectionsRepo, id: string): Connection
   const connection = connections.get(id);
   if (!connection) throw new AppError(404, 'connection_not_found', 'connection not found');
   return connection;
+}
+
+/** The 202 reply leaves nobody awaiting `done`; a run that cannot even record its failure must not crash the process. */
+function detached(run: SyncRunRow, done: Promise<SyncRunRow>): SyncRunRow {
+  done.catch((error) => console.error(error));
+  return run;
 }
 
 async function readBody(request: Request): Promise<Record<string, unknown>> {

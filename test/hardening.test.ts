@@ -76,18 +76,29 @@ describe('rate limit cooldown', () => {
 });
 
 describe('cooldown survives a restart', () => {
-  it('a run killed while waiting out a Retry-After still blocks new syncs until it passes', async () => {
+  it('a run left running by a crash keeps the Retry-After it was waiting out', async () => {
     let release!: () => void;
+    let sleeping!: () => void;
     const blocked = new Promise<void>((resolve) => (release = resolve));
-    const h = createHarness({ sleeper: { sleep: () => blocked } });
+    const entered = new Promise<void>((resolve) => (sleeping = resolve));
+    const h = createHarness({
+      sleeper: {
+        sleep: () => {
+          sleeping();
+          return blocked;
+        },
+      },
+    });
     h.fake.seed('instagram', 'acct', posts3());
     const connection = h.connect('instagram', 'tok');
     h.fake.script('tok', rateLimited('30'), { kind: 'serve' });
 
     const waiting = h.sync.start(connection.id, SEPTEMBER);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await entered;
     h.runs.failInterrupted(h.clock.now().toISOString());
 
+    expect(h.runs.get(waiting.run.id)).toMatchObject({ status: 'failed', error_code: 'interrupted' });
+    expect(h.runs.get(waiting.run.id)!.retry_at).not.toBeNull();
     expect(() => h.sync.start(connection.id, SEPTEMBER)).toThrow(/retry_at/);
     h.clock.advance(30_000);
     release();
@@ -179,6 +190,16 @@ describe('payload validation', () => {
     expect(await h.runSync(connection)).toMatchObject({ status: 'failed', error_code: 'invalid_payload' });
   });
 
+  it('x: a body with neither data nor meta is a failed page, an empty timeline with meta is a successful empty one', async () => {
+    const h = createHarness();
+    const connection = h.connect('x', 'errors', 'a4');
+    h.fake.script('errors', { kind: 'raw', status: 200, body: { errors: [{ detail: 'upstream lookup failed' }] } });
+    expect(await h.runSync(connection)).toMatchObject({ status: 'failed', error_code: 'invalid_payload' });
+
+    h.fake.script('errors', { kind: 'raw', status: 200, body: { meta: { result_count: 0 } } });
+    expect(await h.runSync(connection)).toMatchObject({ status: 'succeeded', pages: 1, posts_upserted: 0 });
+  });
+
   it('rejects counters above the supported range and unrepresentable timestamps', async () => {
     const h = createHarness();
     const ig = h.connect('instagram', 'huge', 'a1');
@@ -210,6 +231,25 @@ describe('storage', () => {
     expect(run).toMatchObject({ status: 'failed', error_code: 'internal', pages: 0, snapshots_inserted: 0, next_cursor: null });
     expect(h.posts.totalsForCreator('creator_1').posts).toBe(0);
     expect(h.db.get<{ n: number }>('SELECT COUNT(*) AS n FROM sync_run_posts')!.n).toBe(0);
+  });
+
+  it('the last page and the succeeded status commit together, so a resume never restarts the listing', async () => {
+    const t = setup({ pageSize: 2 });
+    t.db.run(
+      `CREATE TRIGGER no_success BEFORE UPDATE ON sync_runs WHEN NEW.status = 'succeeded'
+       BEGIN SELECT RAISE(ABORT, 'boom'); END`,
+    );
+
+    const failed = await t.runSync(t.connection);
+    expect(failed).toMatchObject({ status: 'failed', error_code: 'internal', pages: 1 });
+    expect(failed.next_cursor).not.toBeNull();
+
+    t.db.run('DROP TRIGGER no_success');
+    const callsBefore = t.fake.calls.length;
+    const resumed = await t.sync.resume(failed.id).done;
+
+    expect(resumed).toMatchObject({ status: 'succeeded', pages: 2 });
+    expect(t.fake.calls.length - callsBefore).toBe(1);
   });
 
   it('posts_upserted of a resumed run survives another run touching the same posts', async () => {

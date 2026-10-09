@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { rateLimited } from '../src/providers/fake/fake-provider.ts';
 import { createHarness, fakePost, NOW, OBSERVED } from './support/harness.ts';
 
@@ -154,6 +154,22 @@ describe('sync and reading', () => {
     const res = await h.post(`/connections/${connection.id}/sync?async=true`, { from: '2026-09-01', to: '2026-10-01' });
     expect(res.status).toBe(202);
     expect(res.body.status).toBe('running');
+  });
+
+  it('async=true: a run that cannot record its outcome is logged instead of crashing the process', async () => {
+    const h = setup();
+    const { body: connection } = await connect(h);
+    h.db.run(
+      `CREATE TRIGGER no_finish BEFORE UPDATE ON sync_runs WHEN NEW.status <> 'running'
+       BEGIN SELECT RAISE(ABORT, 'disk full'); END`,
+    );
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await h.post(`/connections/${connection.id}/sync?async=true`, { from: '2026-09-01', to: '2026-10-01' });
+
+    expect(res.status).toBe(202);
+    await vi.waitFor(() => expect(logged).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('disk full') })));
+    logged.mockRestore();
   });
 
   it('a second sync while one runs answers 409', async () => {

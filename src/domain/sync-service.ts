@@ -35,7 +35,7 @@ interface Stop {
 
 export interface StartedSync {
   run: SyncRunRow;
-  /** Resolves with the final run. Never rejects: failures end up in the run row. */
+  /** Resolves with the final run. Failures are recorded in the run row; it rejects only if that write fails too. */
   done: Promise<SyncRunRow>;
 }
 
@@ -106,9 +106,7 @@ export class SyncService {
       const run = runs.get(runId)!;
       const connection = connections.get(run.connection_id)!;
       const outcome = await this.#walkPages(run, connection);
-      if (outcome === 'succeeded') {
-        runs.finish(runId, { status: 'succeeded' }, this.#now());
-      } else {
+      if (outcome !== 'succeeded') {
         this.deps.db.transaction(() => {
           // A 401 for an old token must not revoke a token the user has just renewed.
           const tokenUnchanged = connections.get(connection.id)?.access_token === connection.access_token;
@@ -144,6 +142,7 @@ export class SyncService {
       if (!fetched.ok) return fetched.stop;
 
       const { page, fetchedAt } = fetched;
+      const lastPage = page.nextCursor === null;
       this.deps.db.transaction(() => {
         let inserted = 0;
         let duplicates = 0;
@@ -153,14 +152,16 @@ export class SyncService {
           else duplicates++;
         }
         runs.recordPage(run.id, { nextCursor: page.nextCursor, inserted, duplicates });
+        if (lastPage) runs.finish(run.id, { status: 'succeeded' }, this.#now());
       });
 
-      if (page.nextCursor === null) return 'succeeded';
-      if (usedCursors.has(page.nextCursor)) {
-        return { status: 'failed', code: 'cursor_loop', message: `provider repeated cursor ${page.nextCursor}` };
+      const next = page.nextCursor;
+      if (next === null) return 'succeeded';
+      if (usedCursors.has(next)) {
+        return { status: 'failed', code: 'cursor_loop', message: `provider repeated cursor ${next}` };
       }
-      usedCursors.add(page.nextCursor);
-      cursor = page.nextCursor;
+      usedCursors.add(next);
+      cursor = next;
     }
   }
 
